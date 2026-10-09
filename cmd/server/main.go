@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -13,8 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/joho/godotenv"
+	"github.com/rohankamewar2/global-context-auralink-iil/internal/contextapi"
+	"github.com/rohankamewar2/global-context-auralink-iil/internal/database"
+	"github.com/rohankamewar2/global-context-auralink-iil/internal/sarvam"
 )
 
 func main() {
@@ -26,36 +26,13 @@ func main() {
 }
 
 func run() error {
-	if err := godotenv.Load(); err != nil && !os.IsNotExist(err) {
-		return errors.New("could not load .env; check its formatting")
-	}
-	for _, key := range []string{"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSSLMODE"} {
-		value := os.Getenv(key)
-		if value == "" || value == "REPLACE_ME" {
-			return fmt.Errorf("set %s in .env or the process environment", key)
-		}
-	}
-
-	// pgx reads the PG* environment variables, including passwords with special characters.
-	config, err := pgxpool.ParseConfig("")
-	if err != nil {
-		return errors.New("invalid PostgreSQL configuration")
-	}
-	config.MaxConns = 5
-	config.ConnConfig.ConnectTimeout = 5 * time.Second
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+	pool, err := database.Open(ctx)
 	if err != nil {
-		return errors.New("could not initialize PostgreSQL connection pool")
+		return err
 	}
 	defer pool.Close()
-	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	err = pool.Ping(checkCtx)
-	cancel()
-	if err != nil {
-		return errors.New("PostgreSQL connection failed; check credentials, host, port, and server status")
-	}
 	slog.Info("PostgreSQL connection established")
 
 	mux := http.NewServeMux()
@@ -77,6 +54,30 @@ func run() error {
 	}
 	if port == "" {
 		port = "8080"
+	}
+	apiConfig, err := contextapi.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if apiConfig != nil {
+		ip := net.ParseIP(host)
+		if host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+			return errors.New("private dataset demo API must use a loopback HTTP_HOST")
+		}
+		if err := contextapi.Register(mux, *apiConfig, contextapi.PGStore{Pool: pool}); err != nil {
+			return err
+		}
+		if os.Getenv("SARVAM_VOICE_API_KEY") != "" {
+			voiceConfig, err := sarvam.LoadConfig()
+			if err != nil {
+				return err
+			}
+			if err := contextapi.RegisterBootstrap(mux, *apiConfig, contextapi.PGStore{Pool: pool}, voiceConfig); err != nil {
+				return err
+			}
+			slog.Info("Sarvam variable bootstrap enabled", "sdk_contract_version", sarvam.SDKContractVersion)
+		}
+		slog.Info("private context API enabled", "mode", "local_demo_allowlist", "subject_roles", len(apiConfig.Subjects))
 	}
 	server := &http.Server{
 		Addr: net.JoinHostPort(host, port), Handler: mux,
