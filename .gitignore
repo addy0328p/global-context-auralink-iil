@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+bin/
+dist/
+*.exe
+*.log
+data/
+datasets/
+memory/
+recordings/
+tmp/
